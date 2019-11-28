@@ -3,5 +3,6 @@ return {
 	-- Possible options:
 	-- OrderedBackups: The berezaa method that ensures prevention of data loss
 	-- Standard: Standard data stores. Equivalent to :GetDataStore(key):GetAsync(UserId)
-	SavingMethod = "OrderedBackups",
+	-- OniiBackups: berezaa + locking
+	SavingMethod = "OniiBackups",
 }

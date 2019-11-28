@@ -27,11 +27,30 @@
 	coinStore:Get()
 --]]
 
+local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local ServerStorage = game:GetService("ServerStorage")
+local DataStoreService = game:GetService("DataStoreService")
+local MessagingService = game:GetService("MessagingService")
+
+local LockStore = DataStoreService:GetDataStore("Lock")
+local locked = {}
+-- MessagingService:SubscribeAsync("SaveLock", function(data)
+--     local req = data.Data
+-- 	local s = tostring(req)
+-- 	local t = string.sub(s, 1, 3)
+-- 	local basei = s:match("%u+($d+)")
+-- 	if basei then
+-- 		local UserId = tonumber(basei)
+-- 		if t == "LCK" then
+-- 			locked[UserId] = true
+-- 		elseif t == "ULK" then
+-- 			locked[UserId] = nil
+-- 		end
+-- 	end
+-- end)
 
 local Constants = require(script.Constants)
-local IsPlayer = require(script.IsPlayer)
 local Promise = require(script.Promise)
 local SavingMethods = require(script.SavingMethods)
 local Settings = require(script.Settings)
@@ -55,7 +74,7 @@ local DataStore = {}
 --Internal functions
 function DataStore:Debug(...)
 	if self.debug then
-		print("[DataStore2.Debug]", ...)
+		print(...)
 	end
 end
 
@@ -68,12 +87,8 @@ function DataStore:_GetRaw()
 		self.value = value
 		self:Debug("value received")
 		self.haveValue = true
-	end):finally(function(status)
+	end):finally(function()
 		self.getting = false
-
-		if status == Promise.Status.Rejected then
-			return Promise.reject()
-		end
 	end)
 
 	return self.getRawPromise
@@ -81,7 +96,7 @@ end
 
 function DataStore:_Update(dontCallOnUpdate)
 	if not dontCallOnUpdate then
-		for _, callback in ipairs(self.callbacks) do
+		for _,callback in pairs(self.callbacks) do
 			callback(self.value, self)
 		end
 	end
@@ -120,7 +135,7 @@ function DataStore:Get(defaultValue, dontAttemptGet)
 		end
 
 		if self.value ~= nil then
-			for _, modifier in ipairs(self.beforeInitialGet) do
+			for _,modifier in pairs(self.beforeInitialGet) do
 				self.value = modifier(self.value, self)
 			end
 		end
@@ -142,9 +157,10 @@ function DataStore:Get(defaultValue, dontAttemptGet)
 end
 
 function DataStore:GetAsync(...)
-	return Promise.promisify(function(...)
-		return self:Get(...)
-	end)(...)
+	local args = { ... }
+	return Promise.async(function(resolve)
+		resolve(self:Get(unpack(args)))
+	end)
 end
 
 function DataStore:GetTable(default, ...)
@@ -159,24 +175,26 @@ function DataStore:GetTableAsync(default, ...)
 	assert(default ~= nil, "You must provide a default value.")
 
 	return self:GetAsync(default, ...):andThen(function(result)
-		local changed = false
-		assert(
-			typeof(result) == "table",
-			":GetTable/:GetTableAsync was used when the value in the data store isn't a table."
-		)
+		return Promise.async(function(resolve)
+			local changed = false
+			assert(
+				typeof(result) == "table",
+				":GetTable/:GetTableAsync was used when the value in the data store isn't a table."
+			)
 
-		for defaultKey, defaultValue in pairs(default) do
-			if result[defaultKey] == nil then
-				result[defaultKey] = defaultValue
-				changed = true
+			for defaultKey, defaultValue in pairs(default) do
+				if result[defaultKey] == nil then
+					result[defaultKey] = defaultValue
+					changed = true
+				end
 			end
-		end
 
-		if changed then
-			self:Set(result)
-		end
+			if changed then
+				self:Set(result)
+			end
 
-		return result
+			resolve(result)
+		end)
 	end)
 end
 
@@ -239,6 +257,10 @@ function DataStore:SetBackup(retries, value)
 	self.backupValue = value
 end
 
+function DataStore:ForceBackup()
+	self.backup = false
+end
+
 --[[**
 	<description>
 	Unmark the data store as a backup data store and tell :Get() and reset values to nil.
@@ -248,7 +270,6 @@ function DataStore:ClearBackup()
 	self.backup = nil
 	self.haveValue = false
 	self.value = nil
-	self.getRawPromise = nil
 end
 
 --[[**
@@ -269,7 +290,7 @@ function DataStore:Save()
 	local success, result = self:SaveAsync():await()
 
 	if success then
-		print("saved", self.Name)
+		print("saved " .. self.Name)
 	else
 		error(result)
 	end
@@ -323,21 +344,37 @@ function DataStore:SaveAsync()
 				return
 			end
 
+			print("Checking lock within DS2...")
+			local lock = LockStore:GetAsync(self.UserId)
+			if lock then
+				print("Currently locked. Rejectin...")
+				
+				reject(false, Constants.SaveFailure.Locked)
+				return
+			end
+			
+			warn("Locking data for save...")
+			-- MessagingService:PublishAsync("SaveLock", "LCK" .. tostring(self.UserId))
+			local s, message = pcall(function() LockStore:SetAsync(self.UserId, true) end)
+			warn("Data locked!")
+
 			return self.savingMethod:Set(save):andThen(function()
 				resolve(true, save)
 			end)
 		end
 	end):andThen(function(saved, save)
-		print(saved, save)
 		if saved then
-			for _, afterSave in ipairs(self.afterSave) do
+			warn("Unlocking data after 6 seconds!")
+			delay(6.01, function()
+				local s, message = pcall(function() LockStore:SetAsync(self.dataStore2.UserId, false) end)
+			end)
+			for _, afterSave in pairs(self.afterSave) do
 				local success, err = pcall(afterSave, save, self)
 
 				if not success then
-					warn("Error on AfterSave:", err)
+					warn("Error on AfterSave: "..err)
 				end
 			end
-
 			self.valueUpdated = false
 		end
 	end)
@@ -391,11 +428,10 @@ do
 	end
 
 	function CombinedDataStore:Set(value, dontCallOnUpdate)
-		return self.combinedStore:GetAsync({}):andThen(function(tableResult)
-			tableResult[self.combinedName] = value
-			self.combinedStore:Set(tableResult, dontCallOnUpdate)
-			self:_Update(dontCallOnUpdate)
-		end)
+		local tableResult = self.combinedStore:GetTable({})
+		tableResult[self.combinedName] = value
+		self.combinedStore:Set(tableResult, dontCallOnUpdate)
+		self:_Update(dontCallOnUpdate)
 	end
 
 	function CombinedDataStore:Update(updateFunc)
@@ -409,15 +445,15 @@ do
 
 	function CombinedDataStore:OnUpdate(callback)
 		if not self.onUpdateCallbacks then
-			self.onUpdateCallbacks = {callback}
+			self.onUpdateCallbacks = { callback }
 		else
-			table.insert(self.onUpdateCallbacks, callback)
+			self.onUpdateCallbacks[#self.onUpdateCallbacks + 1] = callback
 		end
 	end
 
 	function CombinedDataStore:_Update(dontCallOnUpdate)
 		if not dontCallOnUpdate then
-			for _, callback in ipairs(self.onUpdateCallbacks or {}) do
+			for _, callback in pairs(self.onUpdateCallbacks or {}) do
 				callback(self:Get(), self)
 			end
 		end
@@ -427,6 +463,10 @@ do
 
 	function CombinedDataStore:SetBackup(retries)
 		self.combinedStore:SetBackup(retries)
+	end
+
+	function CombinedDataStore:ForceBackup()
+		self.combinedStore.backup = true
 	end
 end
 
@@ -456,7 +496,7 @@ local combinedDataStoreInfo = {}
 	</parameter>
 **--]]
 function DataStore2.Combine(mainKey, ...)
-	for _, name in ipairs({...}) do
+	for _, name in pairs({...}) do
 		combinedDataStoreInfo[name] = mainKey
 	end
 end
@@ -475,8 +515,6 @@ function DataStore2.SaveAll(player)
 	end
 end
 
-DataStore2.SaveAllAsync = Promise.promisify(DataStore2.SaveAll)
-
 function DataStore2.PatchGlobalSettings(patch)
 	for key, value in pairs(patch) do
 		assert(Settings[key] ~= nil, "No such key exists: " .. key)
@@ -487,8 +525,8 @@ end
 
 function DataStore2.__call(_, dataStoreName, player)
 	assert(
-		typeof(dataStoreName) == "string" and IsPlayer.Check(player),
-		("DataStore2() API call expected {string dataStoreName, Player player}, got {%s, %s}")
+		typeof(dataStoreName) == "string" and typeof(player) == "Instance",
+		("DataStore2() API call expected {string dataStoreName, Instance player}, got {%s, %s}")
 		:format(
 			typeof(dataStoreName),
 			typeof(player)
@@ -523,7 +561,7 @@ function DataStore2.__call(_, dataStoreName, player)
 		}, {
 			__index = function(_, key)
 				return CombinedDataStore[key] or dataStore[key]
-			end,
+			end
 		})
 
 		if not DataStoreCache[player] then
@@ -534,15 +572,15 @@ function DataStore2.__call(_, dataStoreName, player)
 		return combinedStore
 	end
 
-	local dataStore = {
-		Name = dataStoreName,
-		UserId = player.UserId,
-		callbacks = {},
-		beforeInitialGet = {},
-		afterSave = {},
-		bindToClose = {},
-	}
+	local dataStore = {}
 
+	dataStore.Name = dataStoreName
+	dataStore.UserId = player.UserId
+
+	dataStore.callbacks = {}
+	dataStore.beforeInitialGet = {}
+	dataStore.afterSave = {}
+	dataStore.bindToClose = {}
 	dataStore.savingMethod = SavingMethods[Settings.SavingMethod].new(dataStore)
 
 	setmetatable(dataStore, DataStoreMetatable)
@@ -550,17 +588,21 @@ function DataStore2.__call(_, dataStoreName, player)
 	local event, fired = Instance.new("BindableEvent"), false
 
 	game:BindToClose(function()
+		if RunService:IsStudio() then
+			warn('LMAO STUDIO BUG TINgZ')
+			return
+		end
 		if not fired then
 			spawn(function()
 				player.Parent = nil -- Forces AncestryChanged to fire and save the data
 			end)
 
-			event.Event:Wait()
+			event.Event:wait()
 		end
 
 		local value = dataStore:Get(nil, true)
 
-		for _, bindToClose in ipairs(dataStore.bindToClose) do
+		for _, bindToClose in pairs(dataStore.bindToClose) do
 			bindToClose(player, value)
 		end
 	end)
@@ -570,11 +612,17 @@ function DataStore2.__call(_, dataStoreName, player)
 		if player:IsDescendantOf(game) then return end
 		playerLeavingConnection:Disconnect()
 		dataStore:SaveAsync():andThen(function()
-			print("player left, saved", dataStoreName)
+			print("player left, saved " .. dataStoreName)
+			local s, message = pcall(function() LockStore:SetAsync(player.UserId, false) end)
+			print("Unlocked data...")
 		end):catch(function(error)
 			-- TODO: Something more elegant
-			warn("error when player left!", error)
+			warn("error when player left! " .. error)
 		end):finally(function()
+			-- MessagingService:PublishAsync("SaveLock", "ULK" .. tostring(player.UserId))
+			-- locked[player.UserId] = nil
+			
+
 			event:Fire()
 			fired = true
 		end)

@@ -17,7 +17,7 @@
 	for multi-place games.
 --]]
 
-local DataStoreServiceRetriever = require(script.Parent.Parent.DataStoreServiceRetriever)
+local DataStoreService = game:GetService("DataStoreService")
 local Promise = require(script.Parent.Parent.Promise)
 
 local OrderedBackups = {}
@@ -58,13 +58,12 @@ function OrderedBackups:Set(value)
 end
 
 function OrderedBackups.new(dataStore2)
-	local dataStoreService = DataStoreServiceRetriever.Get()
 	local dataStoreKey = dataStore2.Name .. "/" .. dataStore2.UserId
 
 	local info = {
 		dataStore2 = dataStore2,
-		dataStore = dataStoreService:GetDataStore(dataStoreKey),
-		orderedDataStore = dataStoreService:GetOrderedDataStore(dataStoreKey),
+		dataStore = DataStoreService:GetDataStore(dataStoreKey),
+		orderedDataStore = DataStoreService:GetOrderedDataStore(dataStoreKey),
 	}
 
 	return setmetatable(info, OrderedBackups)
